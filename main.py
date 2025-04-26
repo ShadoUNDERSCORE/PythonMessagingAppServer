@@ -1,25 +1,24 @@
 from datetime import datetime
-import hashlib
+from bson import ObjectId
 from fastapi import FastAPI, Response, Request, WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pymongo import MongoClient
 
 mgo_client = MongoClient("mongodb://localhost:27017/")
 db = mgo_client["database"]
 users = db["users"]
-# TODO: Make 'messages' have all messages sorted into chats
 messages = db["messages"]
 undelivered = db["undelivered"]
 print("USERS:", [u for u in users.find()])
 print("MESSAGES:", [m for m in messages.find()])
 print("UNDELIVERED:", [f for f in undelivered.find()])
 # Delete ALL messages or users
-# [users.delete_one(u) for u in users.find()]
-# [messages.delete_one(m) for m in messages.find()]
-# [undelivered.delete_one(f) for f in undelivered.find()]
+# users.drop()
+# messages.drop()
+# undelivered.drop()
 
 app = FastAPI()
 
@@ -41,7 +40,7 @@ class User(BaseModel):
 class Message(BaseModel):
     sent_by: str
     sent_to: str
-    chat_id: str | None = None
+    chat_id: str
     message: str
     timestamp: datetime = datetime.now()
 
@@ -49,7 +48,6 @@ class Message(BaseModel):
 class ChatChunk(BaseModel):
     chat_id: str
     chunk_id: int
-    full: bool = False
     messages: list
 
 
@@ -93,11 +91,6 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-# Receive Create Account Packet
-#   If Duplicate Username/Email Send Error Code then END
-#   Add User Data to DB (encrypted by client)
-#   Return Success Code
-#   Call Login then END
 @app.post("/create_account", status_code=201)
 def create_account(new_user: User, response: Response):
     if users.find_one({"username": new_user.username}):
@@ -121,30 +114,40 @@ async def login(user: User, response: Response):
         return f"An Unexpected Error Occurred: {e}"
 
 
-# Receive Message Packet
-#   Store Packet Data in DB
-#   Send New Message Packet to Recipient Client
-#       If Unavailable Store in Temp Data Storage System
-#       *Send Failed Send Packet to Origin Client
-#       Receive Retry Packet
-#           Retrieve From Temp Data Storage System
-#           Retry Send
-#           If Unavailable Restart at: *
-#           If Success Remove Packet From Temp Data Storage System
+def insert_message(message: Message):
+    chunks = [ChatChunk.model_validate(c) for c in messages.find({"chat_id": message.chat_id})]
+    if chunks:
+        chunks = sorted(chunks, key=lambda x: x.chunk_id)
+        # New Chunk
+        if len(chunks[-1].messages) >= 300:
+            messages.insert_one(
+                dict(ChatChunk(chat_id=message.chat_id,
+                               chunk_id=chunks[-1].chunk_id + 1,
+                               messages=[message.model_dump()]
+                               )))
+        else:
+            # Standard Process
+            messages.update_one({"chat_id": chunks[-1].chat_id, "chunk_id": chunks[-1].chunk_id},
+                                {"$push": {"messages": message.model_dump()}})
+    else:
+        # New Chat
+        messages.insert_one(dict(ChatChunk(chat_id=message.chat_id, chunk_id=0, messages=[message.model_dump()])))
+
+
 @app.websocket("/socket")
 async def websocket_endpoint(username: str, websocket: WebSocket):
     await websocket.accept()
     connection = Connection(websocket=websocket, username=username)
     manager.add_connection(connection)
     try:
-        # TODO: Update with new chunk system
         if undelivered.find_one({"sent_to": username}):
             need_delivered = undelivered.find({"sent_to": username})
             for msg in need_delivered:
-                delivered = await manager.forward_message(Message.model_validate(msg), connection)
+                msg = Message.model_validate(msg)
+                delivered = await manager.forward_message(msg, connection)
                 if delivered:
-                    undelivered.delete_one(msg)
-                    messages.insert_one(msg)
+                    undelivered.delete_one(msg.model_dump())
+                    insert_message(msg)
         while True:
             message = Message.model_validate(await websocket.receive_json())
             recipient_websocket = manager.current_connections.get(message.sent_to)
@@ -154,23 +157,7 @@ async def websocket_endpoint(username: str, websocket: WebSocket):
                     websocket=recipient_websocket
                 ))
                 if delivered:
-                    # TODO: Make this a function?
-                    chunks = sorted([ChatChunk.model_validate(c) for c in messages.find({"chat_id": message.chat_id})],
-                                    key=lambda x: x["chunk_id"])
-                    if chunks:
-                        # Chunk Full
-                        if len(chunks[-1].messages) >= 300:
-                            messages.insert_one(
-                                dict(ChatChunk(chat_id=message.chat_id,
-                                               chunk_id=chunks[-1].chunk_id+1,
-                                               messages=[message]
-                                               )))
-                        else:
-                            # Standard Process
-                            messages.update_one({"_id": chunks[-1]["_id"]}, {"$push": {"messages": message}})
-                    else:
-                        # New Chat
-                        messages.insert_one(dict(ChatChunk(chat_id=message.chat_id, chunk_id=0, messages=[message])))
+                    insert_message(message)
                 else:
                     undelivered.insert_one(dict(message))
                     print("Failed to Deliver")
