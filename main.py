@@ -1,11 +1,12 @@
 from datetime import datetime
-from bson import ObjectId
 from fastapi import FastAPI, Response, Request, WebSocket, WebSocketDisconnect
 from fastapi.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.responses import RedirectResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from starlette.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict
 from pymongo import MongoClient
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
 
 mgo_client = MongoClient("mongodb://localhost:27017/")
 db = mgo_client["database"]
@@ -20,21 +21,10 @@ print("UNDELIVERED:", [f for f in undelivered.find()])
 # messages.drop()
 # undelivered.drop()
 
-app = FastAPI()
-
-# noinspection PyTypeChecker
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # for dev
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 class User(BaseModel):
     username: str
-    password: bytes
+    password: str
 
 
 class Message(BaseModel):
@@ -89,6 +79,17 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+app = FastAPI()
+ph = PasswordHasher()
+
+# noinspection PyTypeChecker
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # for dev
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.post("/create_account", status_code=201)
@@ -96,19 +97,29 @@ def create_account(new_user: User, response: Response):
     if users.find_one({"username": new_user.username}):
         response.status_code = 409
         return "Username Already In Use"
-    users.insert_one(new_user.dict())
-    return RedirectResponse(f"/login/{new_user.username}")
+    try:
+        new_user.password = ph.hash(new_user.password)
+        users.insert_one(new_user.model_dump())
+        return "Success"
+    except Exception as e:
+        response.status_code = 500
+        return f"An Unexpected Error Occurred: {e}"
 
 
+# TODO: Make Login Do Stuff
 @app.post("/login", status_code=200)
 async def login(user: User, response: Response):
     username = user.username
-    if not dict(users.find_one({"username": username})):
+    password = user.password
+    profile = User.model_validate(users.find_one({"username": username}))
+    if not dict(profile):
         response.status_code = 404
         return "User Does Not Exist"
     try:
-        # TODO: Check Password hash
-        ...
+        ph.verify(profile.password, password)
+        return "Success"
+    except VerifyMismatchError:
+        return "Password Incorrect"
     except Exception as e:
         response.status_code = 500
         return f"An Unexpected Error Occurred: {e}"
