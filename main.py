@@ -106,7 +106,6 @@ def create_account(new_user: User, response: Response):
         return f"An Unexpected Error Occurred: {e}"
 
 
-# TODO: Make Login Do Stuff
 @app.post("/login", status_code=200)
 async def login(user: User, response: Response):
     username = user.username
