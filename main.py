@@ -11,9 +11,11 @@ from argon2.exceptions import VerifyMismatchError
 mgo_client = MongoClient("mongodb://localhost:27017/")
 db = mgo_client["database"]
 users = db["users"]
+user_contacts = db["user_contacts"]
 messages = db["messages"]
 undelivered = db["undelivered"]
 print("USERS:", [u for u in users.find()])
+print("CONTACT DB: ", [c for c in user_contacts.find()])
 print("MESSAGES:", [m for m in messages.find()])
 print("UNDELIVERED:", [f for f in undelivered.find()])
 # Delete ALL messages or users
@@ -25,6 +27,11 @@ print("UNDELIVERED:", [f for f in undelivered.find()])
 class User(BaseModel):
     username: str
     password: str
+
+
+class ContactList(BaseModel):
+    contacts_of: str
+    contacts_list: list
 
 
 class Message(BaseModel):
@@ -92,6 +99,31 @@ app.add_middleware(
 )
 
 
+@app.post("/add_contact", status_code=201)
+def add_contact(for_user: str, contact_name: str, response: Response):
+    current_contacts = user_contacts.find_one({"contacts_of": for_user})
+    if current_contacts:
+        current_contacts = ContactList.model_validate(current_contacts)
+        if contact_name in current_contacts.contacts_list:
+            response.status_code = 409
+            return "Already a Contact"
+        else:
+            user_contacts.update_one({"contacts_of": for_user}, {"$push": {"contacts_list": contact_name}})
+            return "Success"
+    else:
+        user_contacts.insert_one({"contacts_of": for_user, "contacts_list": [contact_name]})
+        return "Success"
+
+
+@app.get("/get_contacts", status_code=200)
+def get_contacts(for_user: str):
+    contacts = user_contacts.find_one({"contacts_of": for_user})
+    if contacts:
+        contacts = ContactList.model_validate(contacts)
+        return contacts.contacts_list
+    return []
+
+
 @app.post("/create_account", status_code=201)
 def create_account(new_user: User, response: Response):
     if users.find_one({"username": new_user.username}):
@@ -110,10 +142,11 @@ def create_account(new_user: User, response: Response):
 async def login(user: User, response: Response):
     username = user.username
     password = user.password
-    profile = User.model_validate(users.find_one({"username": username}))
-    if not dict(profile):
+    profile = users.find_one({"username": username})
+    if not profile:
         response.status_code = 404
         return "User Does Not Exist"
+    profile = User.model_validate(profile)
     try:
         ph.verify(profile.password, password)
         return "Success"
