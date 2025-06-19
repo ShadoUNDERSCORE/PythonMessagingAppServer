@@ -14,10 +14,10 @@ users = db["users"]
 user_contacts = db["user_contacts"]
 messages = db["messages"]
 undelivered = db["undelivered"]
-print("USERS:", [u for u in users.find()])
-print("CONTACT DB: ", [c for c in user_contacts.find()])
-print("MESSAGES:", [m for m in messages.find()])
-print("UNDELIVERED:", [f for f in undelivered.find()])
+# print("USERS:", [u for u in users.find()])
+# print("CONTACT DB: ", [c for c in user_contacts.find()])
+# print("MESSAGES:", [m for m in messages.find()])
+# print("UNDELIVERED:", [f for f in undelivered.find()])
 # Delete ALL messages or users
 # users.drop()
 # messages.drop()
@@ -206,7 +206,6 @@ async def websocket_endpoint(username: str, websocket: WebSocket):
                     print("Failed to Deliver")
             else:
                 undelivered.insert_one(dict(message))
-                print("Client Currently Offline")
     except WebSocketDisconnect:
         await manager.remove_connection(connection)
         print("Socket Disconnected")
